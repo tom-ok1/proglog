@@ -1,0 +1,28 @@
+GET http://localhost:8080
+content-type: application/json
+
+{
+   "offset": 8
+}
+
+###
+
+POST http://localhost:8080
+content-type: application/json
+
+{
+   "record": {
+        "value": "dGVzdA=="
+   } 
+}
+
+###
+
+POST http://localhost:8080
+content-type: application/json
+
+{
+   "record": {
+        "value": "dW5jaGk="
+   } 
+}

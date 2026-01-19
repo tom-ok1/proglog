@@ -102,3 +102,7 @@ func (i *index) isEmpty() bool {
 func (i *index) Name() string {
 	return i.file.Name()
 }
+
+func (i *index) isMaxed() bool {
+	return uint64(len(i.mmap)) < i.size+entWidth
+}

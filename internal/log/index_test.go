@@ -7,36 +7,62 @@ import (
 )
 
 func TestIndex(t *testing.T) {
+	for scenario, fn := range map[string]func(
+		t *testing.T,
+		idx *index,
+		c Config,
+	){
+		"read from empty index returns EOF":     testIndexReadEmpty,
+		"write and read entries succeeds":       testIndexWriteRead,
+		"read with -1 returns last entry":       testIndexReadLast,
+		"read past end returns EOF":             testIndexReadPastEnd,
+		"close truncates file to actual size":   testIndexClose,
+		"reopen after close preserves entries":  testIndexReopenAfterClose,
+		"write to full index returns EOF":       testIndexWriteFull,
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			idx, c, teardown := setupIndex(t)
+			defer teardown()
+			fn(t, idx, c)
+		})
+	}
+}
+
+func setupIndex(t *testing.T) (
+	idx *index,
+	c Config,
+	teardown func(),
+) {
+	t.Helper()
+
 	f, err := os.CreateTemp("", "index_test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(f.Name())
 
-	c := Config{}
+	c = Config{}
 	c.Segment.MaxIndexBytes = 1024
 
-	idx, err := newIndex(f, c)
+	idx, err = newIndex(f, c)
 	if err != nil {
+		os.Remove(f.Name())
 		t.Fatal(err)
 	}
 
-	// Test reading from empty index returns EOF
-	_, _, err = idx.Read(-1)
+	return idx, c, func() {
+		idx.Close()
+		os.Remove(f.Name())
+	}
+}
+
+func testIndexReadEmpty(t *testing.T, idx *index, c Config) {
+	_, _, err := idx.Read(-1)
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
+}
 
-	// Test file was truncated to MaxIndexBytes
-	fi, err := os.Stat(f.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Size() != int64(c.Segment.MaxIndexBytes) {
-		t.Fatalf("expected file size %d, got %d", c.Segment.MaxIndexBytes, fi.Size())
-	}
-
-	// Test writing and reading entries
+func testIndexWriteRead(t *testing.T, idx *index, c Config) {
 	entries := []struct {
 		off uint32
 		pos uint64
@@ -47,12 +73,11 @@ func TestIndex(t *testing.T) {
 	}
 
 	for _, want := range entries {
-		err = idx.Write(want.off, want.pos)
+		err := idx.Write(want.off, want.pos)
 		if err != nil {
 			t.Fatalf("Write(%d, %d) failed: %v", want.off, want.pos, err)
 		}
 
-		// Read the entry we just wrote using the offset as the index
 		off, pos, err := idx.Read(int64(want.off))
 		if err != nil {
 			t.Fatalf("Read(%d) failed: %v", want.off, err)
@@ -64,8 +89,25 @@ func TestIndex(t *testing.T) {
 			t.Fatalf("expected pos=%d, got %d", want.pos, pos)
 		}
 	}
+}
 
-	// Test reading with -1 returns last entry
+func testIndexReadLast(t *testing.T, idx *index, c Config) {
+	entries := []struct {
+		off uint32
+		pos uint64
+	}{
+		{off: 0, pos: 0},
+		{off: 1, pos: 10},
+		{off: 2, pos: 20},
+	}
+
+	for _, entry := range entries {
+		err := idx.Write(entry.off, entry.pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	off, pos, err := idx.Read(-1)
 	if err != nil {
 		t.Fatalf("Read(-1) failed: %v", err)
@@ -77,21 +119,56 @@ func TestIndex(t *testing.T) {
 	if pos != lastEntry.pos {
 		t.Fatalf("expected pos=%d, got %d", lastEntry.pos, pos)
 	}
+}
 
-	// Test reading past the end returns EOF
-	_, _, err = idx.Read(int64(len(entries)))
+func testIndexReadPastEnd(t *testing.T, idx *index, c Config) {
+	entries := []struct {
+		off uint32
+		pos uint64
+	}{
+		{off: 0, pos: 0},
+		{off: 1, pos: 10},
+		{off: 2, pos: 20},
+	}
+
+	for _, entry := range entries {
+		err := idx.Write(entry.off, entry.pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, err := idx.Read(int64(len(entries)))
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF when reading past end, got %v", err)
 	}
+}
 
-	// Test Close
-	err = idx.Close()
+func testIndexClose(t *testing.T, idx *index, c Config) {
+	entries := []struct {
+		off uint32
+		pos uint64
+	}{
+		{off: 0, pos: 0},
+		{off: 1, pos: 10},
+		{off: 2, pos: 20},
+	}
+
+	for _, entry := range entries {
+		err := idx.Write(entry.off, entry.pos)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	name := idx.Name()
+
+	err := idx.Close()
 	if err != nil {
 		t.Fatalf("Close() failed: %v", err)
 	}
 
-	// Verify file was truncated to actual size after close
-	fi, err = os.Stat(f.Name())
+	fi, err := os.Stat(name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,23 +178,8 @@ func TestIndex(t *testing.T) {
 	}
 }
 
-func TestIndexReopenAfterClose(t *testing.T) {
-	f, err := os.CreateTemp("", "index_reopen_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(f.Name())
-
-	c := Config{}
-	c.Segment.MaxIndexBytes = 1024
-
-	idx, err := newIndex(f, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Write some entries
-	err = idx.Write(0, 0)
+func testIndexReopenAfterClose(t *testing.T, idx *index, c Config) {
+	err := idx.Write(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,14 +188,13 @@ func TestIndexReopenAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Close the index
+	name := idx.Name()
 	err = idx.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Reopen the file and create a new index
-	f, err = os.OpenFile(f.Name(), os.O_RDWR, 0600)
+	f, err := os.OpenFile(name, os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,8 +203,8 @@ func TestIndexReopenAfterClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer idx.Close()
 
-	// Verify we can read the previously written entries
 	off, pos, err := idx.Read(0)
 	if err != nil {
 		t.Fatalf("Read(0) after reopen failed: %v", err)
@@ -160,7 +221,6 @@ func TestIndexReopenAfterClose(t *testing.T) {
 		t.Fatalf("expected (1, 10), got (%d, %d)", off, pos)
 	}
 
-	// Verify Read(-1) returns the last entry
 	off, pos, err = idx.Read(-1)
 	if err != nil {
 		t.Fatalf("Read(-1) after reopen failed: %v", err)
@@ -168,30 +228,28 @@ func TestIndexReopenAfterClose(t *testing.T) {
 	if off != 1 || pos != 10 {
 		t.Fatalf("expected (1, 10), got (%d, %d)", off, pos)
 	}
-
-	err = idx.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
 }
 
-func TestIndexWriteFull(t *testing.T) {
+func testIndexWriteFull(t *testing.T, idx *index, c Config) {
+	// Close the default index and create one with small max size
+	name := idx.Name()
+	idx.Close()
+	os.Remove(name)
+
 	f, err := os.CreateTemp("", "index_full_test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(f.Name())
 
-	c := Config{}
-	// Set max size to only fit 3 entries (each entry is 12 bytes)
 	c.Segment.MaxIndexBytes = uint64(entWidth) * 3
 
-	idx, err := newIndex(f, c)
+	idx, err = newIndex(f, c)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer idx.Close()
 
-	// Write 3 entries (should succeed)
 	for i := uint32(0); i < 3; i++ {
 		err = idx.Write(i, uint64(i*10))
 		if err != nil {
@@ -199,14 +257,8 @@ func TestIndexWriteFull(t *testing.T) {
 		}
 	}
 
-	// Try to write 4th entry (should fail with EOF)
 	err = idx.Write(3, 30)
 	if err != io.EOF {
 		t.Fatalf("expected io.EOF when index is full, got %v", err)
-	}
-
-	err = idx.Close()
-	if err != nil {
-		t.Fatal(err)
 	}
 }

@@ -10,35 +10,57 @@ import (
 )
 
 func TestLog(t *testing.T) {
+	for scenario, fn := range map[string]func(
+		t *testing.T,
+		log *Log,
+	){
+		"append and read succeeds":                testLogAppendRead,
+		"read out of range returns error":         testLogOutOfRangeErr,
+		"reopen preserves existing entries":       testLogInitExisting,
+		"multiple segments created when needed":   testLogWithMultipleSegments,
+		"initial offset configuration works":      testLogWithInitialOffset,
+		"reader returns all data":                 testLogReader,
+		"truncate removes old segments":           testLogTruncate,
+		"remove deletes log directory":            testLogRemove,
+		"default config applies defaults":         testNewLogWithDefaultConfig,
+		"lowest and highest offset tracking":      testLogLowestAndHighestOffset,
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			log, teardown := setupLog(t)
+			defer teardown()
+			fn(t, log)
+		})
+	}
+}
+
+func setupLog(t *testing.T) (
+	log *Log,
+	teardown func(),
+) {
+	t.Helper()
+
 	dir, err := os.MkdirTemp("", "log_test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir)
 
 	c := Config{}
 	c.Segment.MaxStoreBytes = 1024
 	c.Segment.MaxIndexBytes = 1024
 
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
+		os.RemoveAll(dir)
 		t.Fatal(err)
 	}
 
-	testAppendRead(t, log)
-	testOutOfRangeErr(t, log)
-	testInitExisting(t, log, dir, c)
-	testReader(t, log)
-	testTruncate(t, log)
-
-	err = log.Close()
-	if err != nil {
-		t.Fatal(err)
+	return log, func() {
+		log.Close()
+		os.RemoveAll(dir)
 	}
 }
 
-func testAppendRead(t *testing.T, log *Log) {
-	t.Helper()
+func testLogAppendRead(t *testing.T, log *Log) {
 	want := &api.Record{Value: []byte("hello world")}
 
 	off, err := log.Append(want)
@@ -56,8 +78,12 @@ func testAppendRead(t *testing.T, log *Log) {
 	}
 }
 
-func testOutOfRangeErr(t *testing.T, log *Log) {
-	t.Helper()
+func testLogOutOfRangeErr(t *testing.T, log *Log) {
+	_, err := log.Append(&api.Record{Value: []byte("hello world")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	highestOff, err := log.HighestOff()
 	if err != nil {
 		t.Fatal(err)
@@ -69,10 +95,7 @@ func testOutOfRangeErr(t *testing.T, log *Log) {
 	}
 }
 
-func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
-	t.Helper()
-
-	// Append some records
+func testLogInitExisting(t *testing.T, log *Log) {
 	want := &api.Record{Value: []byte("hello world")}
 	for i := 0; i < 3; i++ {
 		_, err := log.Append(want)
@@ -81,7 +104,6 @@ func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
 		}
 	}
 
-	// Get offsets before closing
 	lowestBefore, err := log.LowestOffset()
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +113,9 @@ func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
 		t.Fatal(err)
 	}
 
-	// Close and reopen
+	dir := log.Dir
+	c := log.Config
+
 	err = log.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -101,8 +125,8 @@ func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer newLog.Close()
 
-	// Verify offsets are preserved
 	lowestAfter, err := newLog.LowestOffset()
 	if err != nil {
 		t.Fatal(err)
@@ -119,7 +143,6 @@ func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
 		t.Fatalf("expected highestOffset=%d, got %d", highestBefore, highestAfter)
 	}
 
-	// Verify we can still read existing records
 	for off := lowestAfter; off <= highestAfter; off++ {
 		record, err := newLog.Read(off)
 		if err != nil {
@@ -129,67 +152,14 @@ func testInitExisting(t *testing.T, log *Log, dir string, c Config) {
 			t.Fatalf("expected value=%s, got %s", want.Value, record.Value)
 		}
 	}
-
-	// Replace the log for subsequent tests
-	*log = *newLog
 }
 
-func testReader(t *testing.T, log *Log) {
-	t.Helper()
+func testLogWithMultipleSegments(t *testing.T, log *Log) {
+	// Close the default log and create one with small segment sizes
+	dir := log.Dir
+	log.Close()
+	os.RemoveAll(dir)
 
-	highestOff, err := log.HighestOff()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	reader := log.Reader()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(data) == 0 {
-		t.Fatal("expected data from reader, got empty")
-	}
-
-	// Verify we can read records from the log
-	lowestOff, err := log.LowestOffset()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Check that the number of records matches
-	recordCount := highestOff - lowestOff + 1
-	if recordCount == 0 {
-		t.Fatal("expected at least one record in log")
-	}
-}
-
-func testTruncate(t *testing.T, log *Log) {
-	t.Helper()
-
-	// The log already has records from previous tests
-	lowestOff, err := log.LowestOffset()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Truncate at the lowest offset - this should not remove all segments
-	// since we only remove segments where nextOffset-1 <= lowest
-	err = log.Truncate(lowestOff)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The log should still be functional
-	want := &api.Record{Value: []byte("hello world")}
-	_, err = log.Append(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestLogWithMultipleSegments(t *testing.T) {
 	dir, err := os.MkdirTemp("", "log_multi_segment_test")
 	if err != nil {
 		t.Fatal(err)
@@ -197,11 +167,10 @@ func TestLogWithMultipleSegments(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	c := Config{}
-	// Use small segment sizes to force multiple segments
 	c.Segment.MaxStoreBytes = 32
 	c.Segment.MaxIndexBytes = uint64(entWidth) * 3
 
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +178,6 @@ func TestLogWithMultipleSegments(t *testing.T) {
 
 	want := &api.Record{Value: []byte("hello")}
 
-	// Append enough records to create multiple segments
 	var offsets []uint64
 	for i := 0; i < 10; i++ {
 		off, err := log.Append(want)
@@ -219,7 +187,6 @@ func TestLogWithMultipleSegments(t *testing.T) {
 		offsets = append(offsets, off)
 	}
 
-	// Verify all records can be read back
 	for _, off := range offsets {
 		got, err := log.Read(off)
 		if err != nil {
@@ -230,13 +197,17 @@ func TestLogWithMultipleSegments(t *testing.T) {
 		}
 	}
 
-	// Verify we have multiple segments
 	if len(log.segments) <= 1 {
 		t.Fatal("expected multiple segments")
 	}
 }
 
-func TestLogWithInitialOffset(t *testing.T) {
+func testLogWithInitialOffset(t *testing.T, log *Log) {
+	// Close the default log and create one with initial offset
+	dir := log.Dir
+	log.Close()
+	os.RemoveAll(dir)
+
 	dir, err := os.MkdirTemp("", "log_initial_offset_test")
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +219,7 @@ func TestLogWithInitialOffset(t *testing.T) {
 	c.Segment.MaxIndexBytes = 1024
 	c.Segment.InitialOffset = 100
 
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,25 +244,9 @@ func TestLogWithInitialOffset(t *testing.T) {
 	}
 }
 
-func TestLogReader(t *testing.T) {
-	dir, err := os.MkdirTemp("", "log_reader_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-
-	c := Config{}
-	c.Segment.MaxStoreBytes = 1024
-	c.Segment.MaxIndexBytes = 1024
-
-	log, err := NewLog(dir, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer log.Close()
-
+func testLogReader(t *testing.T, log *Log) {
 	want := &api.Record{Value: []byte("hello world")}
-	_, err = log.Append(want)
+	_, err := log.Append(want)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,13 +257,10 @@ func TestLogReader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The data should contain the record (with length prefix from store)
-	// Length prefix is 8 bytes (uint64)
 	if len(data) <= 8 {
 		t.Fatal("expected data to contain record with length prefix")
 	}
 
-	// Extract record from data (skip the 8-byte length prefix)
 	recordData := data[8:]
 	got := &api.Record{}
 	err = proto.Unmarshal(recordData, got)
@@ -321,7 +273,12 @@ func TestLogReader(t *testing.T) {
 	}
 }
 
-func TestLogTruncate(t *testing.T) {
+func testLogTruncate(t *testing.T, log *Log) {
+	// Close the default log and create one with small segment sizes
+	dir := log.Dir
+	log.Close()
+	os.RemoveAll(dir)
+
 	dir, err := os.MkdirTemp("", "log_truncate_test")
 	if err != nil {
 		t.Fatal(err)
@@ -329,11 +286,10 @@ func TestLogTruncate(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	c := Config{}
-	// Use small segment sizes to force multiple segments
 	c.Segment.MaxStoreBytes = 32
 	c.Segment.MaxIndexBytes = uint64(entWidth) * 2
 
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,14 +297,11 @@ func TestLogTruncate(t *testing.T) {
 
 	want := &api.Record{Value: []byte("hi")}
 
-	// Append enough records to create multiple segments
-	var offsets []uint64
 	for i := 0; i < 6; i++ {
-		off, err := log.Append(want)
+		_, err := log.Append(want)
 		if err != nil {
 			t.Fatal(err)
 		}
-		offsets = append(offsets, off)
 	}
 
 	initialSegmentCount := len(log.segments)
@@ -356,66 +309,54 @@ func TestLogTruncate(t *testing.T) {
 		t.Fatalf("expected multiple segments, got %d", initialSegmentCount)
 	}
 
-	// Truncate at offset 2 (should remove segments with all records <= 2)
 	err = log.Truncate(2)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Should have fewer segments now
 	if len(log.segments) >= initialSegmentCount {
 		t.Fatalf("expected fewer segments after truncate, had %d, now have %d",
 			initialSegmentCount, len(log.segments))
 	}
 }
 
-func TestLogRemove(t *testing.T) {
-	dir, err := os.MkdirTemp("", "log_remove_test")
+func testLogRemove(t *testing.T, log *Log) {
+	_, err := log.Append(&api.Record{Value: []byte("test")})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c := Config{}
-	c.Segment.MaxStoreBytes = 1024
-	c.Segment.MaxIndexBytes = 1024
-
-	log, err := NewLog(dir, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = log.Append(&api.Record{Value: []byte("test")})
-	if err != nil {
-		t.Fatal(err)
-	}
+	dir := log.Dir
 
 	err = log.Remove()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// The directory should be removed
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("expected log directory to be removed")
 	}
 }
 
-func TestNewLogWithDefaultConfig(t *testing.T) {
+func testNewLogWithDefaultConfig(t *testing.T, log *Log) {
+	// Close the default log and create one with empty config
+	dir := log.Dir
+	log.Close()
+	os.RemoveAll(dir)
+
 	dir, err := os.MkdirTemp("", "log_default_config_test")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 
-	// Use empty config to test defaults
 	c := Config{}
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer log.Close()
 
-	// Verify defaults were applied
 	if log.Config.Segment.MaxStoreBytes != 1024 {
 		t.Fatalf("expected default MaxStoreBytes=1024, got %d", log.Config.Segment.MaxStoreBytes)
 	}
@@ -423,7 +364,6 @@ func TestNewLogWithDefaultConfig(t *testing.T) {
 		t.Fatalf("expected default MaxIndexBytes=1024, got %d", log.Config.Segment.MaxIndexBytes)
 	}
 
-	// Verify log is functional
 	want := &api.Record{Value: []byte("test")}
 	off, err := log.Append(want)
 	if err != nil {
@@ -440,7 +380,12 @@ func TestNewLogWithDefaultConfig(t *testing.T) {
 	}
 }
 
-func TestLogLowestAndHighestOffset(t *testing.T) {
+func testLogLowestAndHighestOffset(t *testing.T, log *Log) {
+	// Close the default log and create one with initial offset
+	dir := log.Dir
+	log.Close()
+	os.RemoveAll(dir)
+
 	dir, err := os.MkdirTemp("", "log_offset_test")
 	if err != nil {
 		t.Fatal(err)
@@ -452,13 +397,12 @@ func TestLogLowestAndHighestOffset(t *testing.T) {
 	c.Segment.MaxIndexBytes = 1024
 	c.Segment.InitialOffset = 10
 
-	log, err := NewLog(dir, c)
+	log, err = NewLog(dir, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer log.Close()
 
-	// Before any append, check initial state
 	lowestOff, err := log.LowestOffset()
 	if err != nil {
 		t.Fatal(err)
@@ -467,7 +411,6 @@ func TestLogLowestAndHighestOffset(t *testing.T) {
 		t.Fatalf("expected lowestOffset=10, got %d", lowestOff)
 	}
 
-	// Append multiple records
 	want := &api.Record{Value: []byte("test")}
 	for i := 0; i < 5; i++ {
 		_, err := log.Append(want)
@@ -476,7 +419,6 @@ func TestLogLowestAndHighestOffset(t *testing.T) {
 		}
 	}
 
-	// Verify offsets
 	lowestOff, err = log.LowestOffset()
 	if err != nil {
 		t.Fatal(err)

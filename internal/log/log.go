@@ -1,7 +1,6 @@
 package log
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"path"
@@ -114,7 +113,7 @@ func (l *Log) Read(off uint64) (*api.Record, error) {
 	}
 
 	if off > highestOff {
-		return nil, fmt.Errorf("offset out of range: %d", off)
+		return nil, api.ErrOffsetOutOfRange{Offset: off}
 	}
 
 	i := sort.Search(len(l.segments), func(i int) bool {

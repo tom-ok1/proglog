@@ -7,9 +7,10 @@ import (
 	"testing"
 
 	api "github.com/tom-ok1/proglog/api/v1"
+	"github.com/tom-ok1/proglog/internal/config"
 	"github.com/tom-ok1/proglog/internal/log"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 )
 
@@ -44,13 +45,33 @@ func setupTest(t *testing.T, fn func(*Config)) (
 		t.Fatal(err)
 	}
 
-	clientOptions := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	}
-	cc, err := grpc.NewClient(l.Addr().String(), clientOptions...)
+	// Setup client TLS
+	clientTLSConfig, err := config.SetupTLSConfig(config.TLSConfig{
+		CertFile: config.RootClientCertFile,
+		KeyFile:  config.RootClientKeyFile,
+		CAFile:   config.CAFile,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	clientCreds := credentials.NewTLS(clientTLSConfig)
+	cc, err := grpc.NewClient(l.Addr().String(), grpc.WithTransportCredentials(clientCreds))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Setup server TLS
+	serverTLSConfig, err := config.SetupTLSConfig(config.TLSConfig{
+		CertFile:      config.ServerCertFile,
+		KeyFile:       config.ServerKeyFile,
+		CAFile:        config.CAFile,
+		ServerAddress: l.Addr().String(),
+		Server:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCreds := credentials.NewTLS(serverTLSConfig)
 
 	dir := t.TempDir()
 
@@ -65,12 +86,11 @@ func setupTest(t *testing.T, fn func(*Config)) (
 	if fn != nil {
 		fn(cfg)
 	}
-	server, err := newgrpcServer(cfg)
+
+	gsrv, err := NewGRPCServer(cfg, grpc.Creds(serverCreds))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gsrv := grpc.NewServer()
-	api.RegisterLogServer(gsrv, server)
 
 	go func() {
 		gsrv.Serve(l)

@@ -26,14 +26,14 @@ func newgrpcServer(config *Config) (srv *grpcServer, err error) {
 	return srv, nil
 }
 
-func NewGRPCServer(config *Config) (*grpcServer, error) {
-	gsrv := grpc.NewServer()
+func NewGRPCServer(config *Config, grpcOpts ...grpc.ServerOption) (*grpc.Server, error) {
+	gsrv := grpc.NewServer(grpcOpts...)
 	srv, err := newgrpcServer(config)
 	if err != nil {
 		return nil, err
 	}
 	api.RegisterLogServer(gsrv, srv)
-	return srv, nil
+	return gsrv, nil
 }
 
 func (s *grpcServer) Produce(ctx context.Context, req *api.ProduceRequest) (*api.ProduceResponse, error) {

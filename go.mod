@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/joho/godotenv v1.5.1
 	github.com/tysonmote/gommap v0.0.3
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda
 )

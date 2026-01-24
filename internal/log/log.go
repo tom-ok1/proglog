@@ -142,13 +142,31 @@ func (l *Log) Remove() error {
 	return os.RemoveAll(l.Dir)
 }
 
+func (l *Log) Reset() error {
+	if err := l.Remove(); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(l.Dir, 0755); err != nil {
+		return err
+	}
+
+	seg, err := newSegment(l.Dir, l.Config.Segment.InitialOffset, l.Config)
+	if err != nil {
+		return err
+	}
+	l.segments = []*segment{seg}
+	l.activeSegment = seg
+	return nil
+}
+
 func (l *Log) LowestOffset() (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.segments[0].baseOffset, nil
 }
 
-func (l *Log) HighestOff() (uint64, error) {
+func (l *Log) HighestOffset() (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.highestOffset()

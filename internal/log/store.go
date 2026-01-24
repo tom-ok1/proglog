@@ -12,7 +12,7 @@ var (
 )
 
 const (
-	lenUint64 = 8
+	lenWidth = 8
 )
 
 type store struct {
@@ -50,7 +50,7 @@ func (s *store) Append(p []byte) (n uint64, pos uint64, err error) {
 	if err != nil {
 		return 0, 0, nil
 	}
-	n = uint64(nn + lenUint64)
+	n = uint64(nn + lenWidth)
 	s.size += n
 	return n, pos, nil
 }
@@ -63,13 +63,13 @@ func (s *store) Read(pos uint64) ([]byte, error) {
 		return nil, err
 	}
 
-	size := make([]byte, lenUint64)
+	size := make([]byte, lenWidth)
 	if _, err := s.File.ReadAt(size, int64(pos)); err != nil {
 		return nil, err
 	}
 
 	b := make([]byte, enc.Uint64(size))
-	if _, err := s.File.ReadAt(b, int64(pos+lenUint64)); err != nil {
+	if _, err := s.File.ReadAt(b, int64(pos+lenWidth)); err != nil {
 		return nil, err
 	}
 	return b, nil

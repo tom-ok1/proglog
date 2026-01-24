@@ -14,16 +14,16 @@ func TestLog(t *testing.T) {
 		t *testing.T,
 		log *Log,
 	){
-		"append and read succeeds":                testLogAppendRead,
-		"read out of range returns error":         testLogOutOfRangeErr,
-		"reopen preserves existing entries":       testLogInitExisting,
-		"multiple segments created when needed":   testLogWithMultipleSegments,
-		"initial offset configuration works":      testLogWithInitialOffset,
-		"reader returns all data":                 testLogReader,
-		"truncate removes old segments":           testLogTruncate,
-		"remove deletes log directory":            testLogRemove,
-		"default config applies defaults":         testNewLogWithDefaultConfig,
-		"lowest and highest offset tracking":      testLogLowestAndHighestOffset,
+		"append and read succeeds":              testLogAppendRead,
+		"read out of range returns error":       testLogOutOfRangeErr,
+		"reopen preserves existing entries":     testLogInitExisting,
+		"multiple segments created when needed": testLogWithMultipleSegments,
+		"initial offset configuration works":    testLogWithInitialOffset,
+		"reader returns all data":               testLogReader,
+		"truncate removes old segments":         testLogTruncate,
+		"remove deletes log directory":          testLogRemove,
+		"default config applies defaults":       testNewLogWithDefaultConfig,
+		"lowest and highest offset tracking":    testLogLowestAndHighestOffset,
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			log, teardown := setupLog(t)
@@ -84,7 +84,7 @@ func testLogOutOfRangeErr(t *testing.T, log *Log) {
 		t.Fatal(err)
 	}
 
-	highestOff, err := log.HighestOff()
+	highestOff, err := log.HighestOffset()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func testLogInitExisting(t *testing.T, log *Log) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	highestBefore, err := log.HighestOff()
+	highestBefore, err := log.HighestOffset()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func testLogInitExisting(t *testing.T, log *Log) {
 		t.Fatalf("expected lowestOffset=%d, got %d", lowestBefore, lowestAfter)
 	}
 
-	highestAfter, err := newLog.HighestOff()
+	highestAfter, err := newLog.HighestOffset()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func testLogLowestAndHighestOffset(t *testing.T, log *Log) {
 		t.Fatalf("expected lowestOffset=10, got %d", lowestOff)
 	}
 
-	highestOff, err := log.HighestOff()
+	highestOff, err := log.HighestOffset()
 	if err != nil {
 		t.Fatal(err)
 	}

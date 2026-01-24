@@ -7,7 +7,7 @@ import (
 
 var (
 	write = []byte("hello world")
-	width = uint64(len(write)) + lenUint64
+	width = uint64(len(write)) + lenWidth
 )
 
 func TestStore(t *testing.T) {
@@ -15,10 +15,10 @@ func TestStore(t *testing.T) {
 		t *testing.T,
 		s *store,
 	){
-		"append and read succeeds":       testStoreAppendRead,
-		"read at specific position":      testStoreReadAt,
-		"close flushes data to disk":     testStoreClose,
-		"reopen preserves data":          testStoreReopen,
+		"append and read succeeds":   testStoreAppendRead,
+		"read at specific position":  testStoreReadAt,
+		"close flushes data to disk": testStoreClose,
+		"reopen preserves data":      testStoreReopen,
 	} {
 		t.Run(scenario, func(t *testing.T) {
 			s, teardown := setupStore(t)
@@ -84,13 +84,13 @@ func testStoreReadAt(t *testing.T, s *store) {
 	}
 
 	for i, off := uint64(1), int64(0); i < 4; i++ {
-		b := make([]byte, lenUint64)
+		b := make([]byte, lenWidth)
 		n, err := s.ReadAt(b, off)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if n != lenUint64 {
-			t.Fatalf("expected %d bytes, got %d", lenUint64, n)
+		if n != lenWidth {
+			t.Fatalf("expected %d bytes, got %d", lenWidth, n)
 		}
 		off += int64(n)
 

@@ -185,18 +185,20 @@ func (l *DistributedLog) Join(id, addr string) error {
 	serverID := raft.ServerID(id)
 	serverAddr := raft.ServerAddress(addr)
 	for _, srv := range configFuture.Configuration().Servers {
+		if srv.ID == serverID && srv.Address == serverAddr {
+			// server has already joined
+			return nil
+		}
+
 		if srv.ID == serverID || srv.Address == serverAddr {
-			if srv.ID == serverID && srv.Address == serverAddr {
-				// server has already joined
-				return nil
-			}
-			// remove the existing server
+			// conflict, remove the existing server
 			removeFuture := l.raft.RemoveServer(serverID, 0, 0)
 			if err := removeFuture.Error(); err != nil {
 				return err
 			}
 		}
 	}
+
 	addFuture := l.raft.AddVoter(serverID, serverAddr, 0, 0)
 	if err := addFuture.Error(); err != nil {
 		return err
@@ -209,9 +211,6 @@ func (l *DistributedLog) Leave(id string) error {
 	return removeFuture.Error()
 }
 
-// END: cluster
-
-// START: wait
 func (l *DistributedLog) WaitForLeader(timeout time.Duration) error {
 	timeoutc := time.After(timeout)
 	ticker := time.NewTicker(time.Second)
@@ -228,9 +227,6 @@ func (l *DistributedLog) WaitForLeader(timeout time.Duration) error {
 	}
 }
 
-// END: wait
-
-// START: log_close
 func (l *DistributedLog) Close() error {
 	f := l.raft.Shutdown()
 	if err := f.Error(); err != nil {
@@ -239,18 +235,12 @@ func (l *DistributedLog) Close() error {
 	return l.log.Close()
 }
 
-// END: log_close
-
-// START: fsm_intro
 var _ raft.FSM = (*fsm)(nil)
 
 type fsm struct {
 	log *Log
 }
 
-// END: fsm_intro
-
-// START: fsm_append
 type RequestType uint8
 
 const (
@@ -280,9 +270,6 @@ func (l *fsm) applyAppend(b []byte) interface{} {
 	return &api.ProduceResponse{Offset: offset}
 }
 
-// END: fsm_append
-
-// START: fsm_snapshot
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
 	r := f.log.Reader()
 	return &snapshot{reader: r}, nil
@@ -336,9 +323,6 @@ func (f *fsm) Restore(r io.ReadCloser) error {
 	return nil
 }
 
-// END: fsm_restore
-
-// START: log_store_intro
 var _ raft.LogStore = (*logStore)(nil)
 
 type logStore struct {
@@ -353,9 +337,6 @@ func newLogStore(dir string, c Config) (*logStore, error) {
 	return &logStore{log}, nil
 }
 
-// END: log_store_intro
-
-// START: log_store_read
 func (l *logStore) FirstIndex() (uint64, error) {
 	return l.LowestOffset()
 }
@@ -377,9 +358,6 @@ func (l *logStore) GetLog(index uint64, out *raft.Log) error {
 	return nil
 }
 
-// END: log_store_read
-
-// START: log_store_write
 func (l *logStore) StoreLog(record *raft.Log) error {
 	return l.StoreLogs([]*raft.Log{record})
 }
@@ -396,16 +374,10 @@ func (l *logStore) StoreLogs(records []*raft.Log) error {
 	return nil
 }
 
-// END: log_store_write
-
-// START: log_store_delete
 func (l *logStore) DeleteRange(min, max uint64) error {
 	return l.Truncate(max)
 }
 
-// END: log_store_delete
-
-// START: stream_layer_intro
 var _ raft.StreamLayer = (*StreamLayer)(nil)
 
 type StreamLayer struct {
@@ -426,9 +398,6 @@ func NewStreamLayer(
 	}
 }
 
-// END: stream_layer_intro
-
-// START: stream_layer_dial
 const RaftRPC = 1
 
 func (s *StreamLayer) Dial(
@@ -440,22 +409,18 @@ func (s *StreamLayer) Dial(
 	if err != nil {
 		return nil, err
 	}
-	// START: identify_raft
-	// identify to mux this is a raft rpc
+
 	_, err = conn.Write([]byte{byte(RaftRPC)})
 	if err != nil {
 		return nil, err
 	}
-	// END: identify_raft
+
 	if s.peerTLSConfig != nil {
 		conn = tls.Client(conn, s.peerTLSConfig)
 	}
 	return conn, err
 }
 
-// END: stream_layer_dial
-
-// START: stream_layer_listener
 func (s *StreamLayer) Accept() (net.Conn, error) {
 	conn, err := s.ln.Accept()
 	if err != nil {
@@ -466,7 +431,7 @@ func (s *StreamLayer) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if bytes.Compare([]byte{byte(RaftRPC)}, b) != 0 {
+	if !bytes.Equal([]byte{byte(RaftRPC)}, b) {
 		return nil, fmt.Errorf("not a raft rpc")
 	}
 	if s.serverTLSConfig != nil {

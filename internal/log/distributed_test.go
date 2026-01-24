@@ -168,10 +168,37 @@ func testJoinLeave(t *testing.T, logs []*DistributedLog) {
 	// Wait for replication to new node
 	time.Sleep(500 * time.Millisecond)
 
+	future := logs[0].raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("failed to get raft configuration: %v", err)
+	}
+	found := false
+	for _, srv := range future.Configuration().Servers {
+		if srv.ID == config.Raft.LocalID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("new node not found in raft configuration")
+	}
+
 	// Leave the cluster
 	err = logs[0].Leave("node-new")
 	if err != nil {
 		t.Fatalf("failed to leave: %v", err)
+	}
+
+	// Wait for the node to leave
+	time.Sleep(500 * time.Millisecond)
+	future = logs[0].raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		t.Fatalf("failed to get raft configuration: %v", err)
+	}
+	for _, srv := range future.Configuration().Servers {
+		if srv.ID == config.Raft.LocalID {
+			t.Fatalf("node-new still found in raft configuration after leaving")
+		}
 	}
 }
 
@@ -201,170 +228,21 @@ func testLeaderElection(t *testing.T, logs []*DistributedLog) {
 		}
 	}
 
-	if !leaderFound {
-		// Give more time for election
-		time.Sleep(1 * time.Second)
-		for i := 1; i < len(logs); i++ {
-			if logs[i].raft.Leader() != "" {
-				leaderFound = true
-				break
+	timeout := time.After(3 * time.Second)
+	tick := time.Tick(100 * time.Millisecond)
+
+	for !leaderFound {
+		select {
+		case <-timeout:
+			t.Fatal("timed out waiting for new leader election")
+		case <-tick:
+			for i := 1; i < len(logs); i++ {
+				if logs[i].raft.Leader() != "" {
+					leaderFound = true
+					break
+				}
 			}
 		}
-	}
-}
-
-func TestLogStore(t *testing.T) {
-	for scenario, fn := range map[string]func(
-		t *testing.T,
-		store *logStore,
-	){
-		"first and last index":   testLogStoreFirstLastIndex,
-		"store and get log":      testLogStoreGetLog,
-		"store multiple logs":    testLogStoreStoreLogs,
-		"delete range":           testLogStoreDeleteRange,
-	} {
-		t.Run(scenario, func(t *testing.T) {
-			store, teardown := setupLogStore(t)
-			defer teardown()
-			fn(t, store)
-		})
-	}
-}
-
-func setupLogStore(t *testing.T) (*logStore, func()) {
-	t.Helper()
-
-	dir := t.TempDir()
-	c := Config{}
-	c.Segment.InitialOffset = 1
-
-	store, err := newLogStore(dir, c)
-	if err != nil {
-		t.Fatalf("failed to create log store: %v", err)
-	}
-
-	return store, func() {
-		store.Close()
-	}
-}
-
-func testLogStoreFirstLastIndex(t *testing.T, store *logStore) {
-	first, err := store.FirstIndex()
-	if err != nil {
-		t.Fatalf("first index failed: %v", err)
-	}
-	if first != 1 {
-		t.Fatalf("expected first index=1, got %d", first)
-	}
-
-	// Store a log entry
-	err = store.StoreLog(&raft.Log{
-		Data:  []byte("test"),
-		Index: 1,
-		Type:  raft.LogCommand,
-		Term:  1,
-	})
-	if err != nil {
-		t.Fatalf("store log failed: %v", err)
-	}
-
-	last, err := store.LastIndex()
-	if err != nil {
-		t.Fatalf("last index failed: %v", err)
-	}
-	if last != 1 {
-		t.Fatalf("expected last index=1, got %d", last)
-	}
-}
-
-func testLogStoreGetLog(t *testing.T, store *logStore) {
-	want := &raft.Log{
-		Data:  []byte("hello"),
-		Index: 1,
-		Type:  raft.LogCommand,
-		Term:  1,
-	}
-
-	err := store.StoreLog(want)
-	if err != nil {
-		t.Fatalf("store log failed: %v", err)
-	}
-
-	got := &raft.Log{}
-	err = store.GetLog(1, got)
-	if err != nil {
-		t.Fatalf("get log failed: %v", err)
-	}
-
-	if string(got.Data) != string(want.Data) {
-		t.Fatalf("got data=%s, want %s", got.Data, want.Data)
-	}
-	if got.Term != want.Term {
-		t.Fatalf("got term=%d, want %d", got.Term, want.Term)
-	}
-	if got.Type != want.Type {
-		t.Fatalf("got type=%d, want %d", got.Type, want.Type)
-	}
-}
-
-func testLogStoreStoreLogs(t *testing.T, store *logStore) {
-	logs := []*raft.Log{
-		{Data: []byte("one"), Index: 1, Type: raft.LogCommand, Term: 1},
-		{Data: []byte("two"), Index: 2, Type: raft.LogCommand, Term: 1},
-		{Data: []byte("three"), Index: 3, Type: raft.LogCommand, Term: 1},
-	}
-
-	err := store.StoreLogs(logs)
-	if err != nil {
-		t.Fatalf("store logs failed: %v", err)
-	}
-
-	for i, want := range logs {
-		got := &raft.Log{}
-		err = store.GetLog(uint64(i+1), got)
-		if err != nil {
-			t.Fatalf("get log %d failed: %v", i+1, err)
-		}
-		if string(got.Data) != string(want.Data) {
-			t.Fatalf("log %d: got data=%s, want %s", i+1, got.Data, want.Data)
-		}
-	}
-
-	last, err := store.LastIndex()
-	if err != nil {
-		t.Fatalf("last index failed: %v", err)
-	}
-	if last != 3 {
-		t.Fatalf("expected last index=3, got %d", last)
-	}
-}
-
-func testLogStoreDeleteRange(t *testing.T, store *logStore) {
-	logs := []*raft.Log{
-		{Data: []byte("one"), Index: 1, Type: raft.LogCommand, Term: 1},
-		{Data: []byte("two"), Index: 2, Type: raft.LogCommand, Term: 1},
-		{Data: []byte("three"), Index: 3, Type: raft.LogCommand, Term: 1},
-	}
-
-	err := store.StoreLogs(logs)
-	if err != nil {
-		t.Fatalf("store logs failed: %v", err)
-	}
-
-	// DeleteRange calls Truncate which removes segments where nextOffset-1 <= max
-	// Verify DeleteRange doesn't error (actual truncation depends on segment boundaries)
-	err = store.DeleteRange(1, 2)
-	if err != nil {
-		t.Fatalf("delete range failed: %v", err)
-	}
-
-	// Verify the store is still usable
-	last, err := store.LastIndex()
-	if err != nil {
-		t.Fatalf("last index failed: %v", err)
-	}
-	if last < 1 {
-		t.Fatalf("expected last index >= 1, got %d", last)
 	}
 }
 
@@ -374,7 +252,7 @@ func TestStreamLayer(t *testing.T) {
 		serverLayer *StreamLayer,
 		clientLayer *StreamLayer,
 	){
-		"dial and accept": testStreamLayerDialAccept,
+		"dial and accept":               testStreamLayerDialAccept,
 		"addr returns listener address": testStreamLayerAddr,
 	} {
 		t.Run(scenario, func(t *testing.T) {

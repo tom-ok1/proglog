@@ -5,25 +5,25 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/hashicorp/serf/serf"
 )
 
 type mockHandler struct {
-	joins  chan serf.Member
-	leaves chan serf.Member
+	joins  chan map[string]string
+	leaves chan string
 }
 
-func (h *mockHandler) HandleJoin(member serf.Member) {
+func (h *mockHandler) Join(name, addr string) error {
 	if h.joins != nil {
-		h.joins <- member
+		h.joins <- map[string]string{"name": name, "addr": addr}
 	}
+	return nil
 }
 
-func (h *mockHandler) HandleLeave(member serf.Member) {
+func (h *mockHandler) Leave(name string) error {
 	if h.leaves != nil {
-		h.leaves <- member
+		h.leaves <- name
 	}
+	return nil
 }
 
 func TestMembership(t *testing.T) {
@@ -49,8 +49,8 @@ func setupMembership(t *testing.T, count int) ([]*Membership, *mockHandler) {
 
 	members := make([]*Membership, count)
 	handler := &mockHandler{
-		joins:  make(chan serf.Member, 16),
-		leaves: make(chan serf.Member, 16),
+		joins:  make(chan map[string]string, 16),
+		leaves: make(chan string, 16),
 	}
 
 	addrs := make([]string, count)
@@ -119,9 +119,9 @@ func testJoinLeave(t *testing.T, members []*Membership) {
 	// Wait for leave event
 	timeout = time.After(5 * time.Second)
 	select {
-	case member := <-handler.leaves:
-		if member.Name != "node-2" {
-			t.Fatalf("expected node-2 to leave, got %s", member.Name)
+	case name := <-handler.leaves:
+		if name != "node-2" {
+			t.Fatalf("expected node-2 to leave, got %s", name)
 		}
 	case <-timeout:
 		t.Fatal("timed out waiting for leave event")

@@ -23,8 +23,8 @@ type Config struct {
 }
 
 type Handler interface {
-	HandleJoin(member serf.Member)
-	HandleLeave(member serf.Member)
+	Join(name, addr string) error
+	Leave(name string) error
 }
 
 func New(handler Handler, config Config) (*Membership, error) {
@@ -82,7 +82,7 @@ func (m *Membership) eventHandler() {
 					continue
 				}
 
-				m.handler.HandleJoin(member)
+				m.handler.Join(member.Name, member.Tags["rpc_addr"])
 			}
 		case serf.EventMemberLeave, serf.EventMemberFailed:
 			for _, member := range e.(serf.MemberEvent).Members {
@@ -90,7 +90,7 @@ func (m *Membership) eventHandler() {
 					continue
 				}
 
-				m.handler.HandleLeave(member)
+				m.handler.Leave(member.Name)
 			}
 		}
 	}

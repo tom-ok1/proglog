@@ -79,35 +79,39 @@ func (r *Replicator) replicate(ctx context.Context, name, addr string) {
 	}
 }
 
-func (r *Replicator) Leave(name string) {
+func (r *Replicator) Leave(name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.closed {
-		return
+		return nil
 	}
 
 	cancel, ok := r.servers[name]
 	if !ok {
 		r.logger.Info("replicator: not replicating to server", zap.String("name", name))
-		return
+		return nil
 	}
 
 	cancel()
 	delete(r.servers, name)
 	r.logger.Info("replicator: stopped replicating to server", zap.String("name", name))
+	return nil
 }
 
-func (r *Replicator) Close() {
+func (r *Replicator) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.closed {
-		return
+		return nil
 	}
 
-	r.cancel()
+	if r.cancel != nil {
+		r.cancel()
+	}
 	r.closed = true
+	return nil
 }
 
 func (r *Replicator) init() {

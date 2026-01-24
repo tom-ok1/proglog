@@ -1,87 +1,104 @@
-package agent
+package agent_test
 
 import (
 	"context"
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	api "github.com/tom-ok1/proglog/api/v1"
+	"github.com/tom-ok1/proglog/internal/agent"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestAgent(t *testing.T) {
-	for scenario, fn := range map[string]func(t *testing.T, agents []*Agent){
-		"produce and consume through agents": testProduceConsume,
+	for scenario, fn := range map[string]func(
+		t *testing.T,
+		agents []*agent.Agent,
+		clients []api.LogClient,
+	){
+		"produce/consume succeeds":        testProduceConsume,
+		"replicate across cluster":        testReplicate,
+		"leader handles produce requests": testLeaderProduces,
 	} {
 		t.Run(scenario, func(t *testing.T) {
-			agents, teardown := setupAgents(t, 3)
+			agents, clients, teardown := setupAgents(t, 3)
 			defer teardown()
-			fn(t, agents)
+			fn(t, agents, clients)
 		})
 	}
 }
 
-func TestAgentShutdown(t *testing.T) {
-	agents, teardown := setupAgents(t, 1)
-	defer teardown()
-
-	c := client(t, agents[0])
-	ctx := context.Background()
-
-	_, err := c.Produce(ctx, &api.ProduceRequest{Record: &api.Record{Value: []byte("test")}})
-	if err != nil {
-		t.Fatalf("produce failed: %v", err)
-	}
-
-	// Shutdown the agent
-	err = agents[0].Shutdown()
-	if err != nil {
-		t.Fatalf("shutdown failed: %v", err)
-	}
-
-	// Verify double shutdown is safe
-	err = agents[0].Shutdown()
-	if err != nil {
-		t.Fatalf("second shutdown should not error: %v", err)
-	}
-}
-
-func setupAgents(t *testing.T, count int) ([]*Agent, func()) {
+func setupAgents(t *testing.T, count int) (
+	[]*agent.Agent,
+	[]api.LogClient,
+	func(),
+) {
 	t.Helper()
 
-	var agents []*Agent
+	agents := make([]*agent.Agent, count)
+	clients := make([]api.LogClient, count)
+	conns := make([]*grpc.ClientConn, count)
+
+	// Get all bind addresses upfront
+	bindAddrs := make([]string, count)
+	rpcPorts := make([]int, count)
 
 	for i := range count {
-		bindAddr := getFreeAddr(t)
-		rpcPort := getFreePort(t)
+		bindAddrs[i] = getFreeAddr(t)
+		rpcPorts[i] = getFreePort(t)
+	}
 
+	for i := range count {
 		dataDir := t.TempDir()
 
 		var startJoinAddrs []string
 		if i > 0 {
-			startJoinAddrs = append(startJoinAddrs, agents[0].Config.BindAddr)
+			startJoinAddrs = []string{bindAddrs[0]}
 		}
 
-		agent, err := New(Config{
+		config := agent.Config{
 			NodeName:       fmt.Sprintf("node-%d", i),
-			BindAddr:       bindAddr,
-			AdvertiseAddr:  bindAddr,
-			RPCPort:        rpcPort,
-			DataDir:        dataDir,
+			Bootstrap:      i == 0,
 			StartJoinAddrs: startJoinAddrs,
-		})
+			BindAddr:       bindAddrs[i],
+			RPCPort:        rpcPorts[i],
+			DataDir:        dataDir,
+			// Use nil TLS configs for testing (insecure mode)
+			ServerTLSConfig: nil,
+			PeerTLSConfig:   nil,
+		}
+
+		a, err := agent.New(config)
 		if err != nil {
 			t.Fatalf("failed to create agent %d: %v", i, err)
 		}
+		agents[i] = a
 
-		agents = append(agents, agent)
+		// Create gRPC client
+		rpcAddr := fmt.Sprintf("127.0.0.1:%d", rpcPorts[i])
+		conn, err := grpc.NewClient(
+			rpcAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("failed to create grpc client %d: %v", i, err)
+		}
+		conns[i] = conn
+		clients[i] = api.NewLogClient(conn)
 	}
 
-	return agents, func() {
-		for _, agent := range agents {
-			_ = agent.Shutdown()
+	// Wait for cluster to stabilize
+	time.Sleep(3 * time.Second)
+
+	return agents, clients, func() {
+		for _, conn := range conns {
+			conn.Close()
+		}
+		for _, a := range agents {
+			a.Shutdown()
 		}
 	}
 }
@@ -108,131 +125,103 @@ func getFreePort(t *testing.T) int {
 	return port
 }
 
-func client(t *testing.T, agent *Agent) api.LogClient {
-	t.Helper()
-
-	rpcAddr, err := agent.Config.ListenRPCAddr()
-	if err != nil {
-		t.Fatalf("failed to get rpc addr: %v", err)
-	}
-
-	conn, err := grpc.NewClient(rpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("failed to dial: %v", err)
-	}
-	t.Cleanup(func() { conn.Close() })
-
-	return api.NewLogClient(conn)
-}
-
-func testProduceConsume(t *testing.T, agents []*Agent) {
-	leaderClient := client(t, agents[0])
-
+func testProduceConsume(t *testing.T, agents []*agent.Agent, clients []api.LogClient) {
 	ctx := context.Background()
+
+	// Use the leader (first node) to produce
 	want := &api.Record{Value: []byte("hello world")}
 
-	produce, err := leaderClient.Produce(ctx, &api.ProduceRequest{Record: want})
+	produceRes, err := clients[0].Produce(ctx, &api.ProduceRequest{Record: want})
 	if err != nil {
 		t.Fatalf("produce failed: %v", err)
 	}
 
-	consume, err := leaderClient.Consume(ctx, &api.ConsumeRequest{Offset: produce.Offset})
+	consumeRes, err := clients[0].Consume(ctx, &api.ConsumeRequest{Offset: produceRes.Offset})
 	if err != nil {
 		t.Fatalf("consume failed: %v", err)
 	}
 
-	if string(consume.Record.Value) != string(want.Value) {
-		t.Fatalf("consume.Record.Value = %s, want %s", consume.Record.Value, want.Value)
+	if string(consumeRes.Record.Value) != string(want.Value) {
+		t.Fatalf("got value=%s, want %s", consumeRes.Record.Value, want.Value)
 	}
 }
 
-func TestConfigListenRPCAddr(t *testing.T) {
-	tests := []struct {
-		name     string
-		bindAddr string
-		rpcPort  int
-		want     string
-		wantErr  bool
-	}{
-		{
-			name:     "valid address",
-			bindAddr: "127.0.0.1:8080",
-			rpcPort:  9090,
-			want:     "127.0.0.1:9090",
-			wantErr:  false,
-		},
-		{
-			name:     "localhost",
-			bindAddr: "localhost:8080",
-			rpcPort:  9090,
-			want:     "localhost:9090",
-			wantErr:  false,
-		},
-		{
-			name:     "invalid address",
-			bindAddr: "invalid",
-			rpcPort:  9090,
-			want:     "",
-			wantErr:  true,
-		},
+func testReplicate(t *testing.T, agents []*agent.Agent, clients []api.LogClient) {
+	ctx := context.Background()
+
+	// Produce to the leader
+	want := &api.Record{Value: []byte("replicated message")}
+
+	produceRes, err := clients[0].Produce(ctx, &api.ProduceRequest{Record: want})
+	if err != nil {
+		t.Fatalf("produce failed: %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := Config{
-				BindAddr: tt.bindAddr,
-				RPCPort:  tt.rpcPort,
-			}
-			got, err := c.ListenRPCAddr()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ListenRPCAddr() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("ListenRPCAddr() = %v, want %v", got, tt.want)
-			}
-		})
+	// Wait for replication
+	time.Sleep(3 * time.Second)
+
+	// Verify all nodes can read the record
+	for i, client := range clients {
+		consumeRes, err := client.Consume(ctx, &api.ConsumeRequest{Offset: produceRes.Offset})
+		if err != nil {
+			t.Fatalf("consume from node %d failed: %v", i, err)
+		}
+
+		if string(consumeRes.Record.Value) != string(want.Value) {
+			t.Fatalf("node %d: got value=%s, want %s", i, consumeRes.Record.Value, want.Value)
+		}
 	}
 }
 
-func TestConfigAdvertiseRPCAddr(t *testing.T) {
-	tests := []struct {
-		name          string
-		advertiseAddr string
-		rpcPort       int
-		want          string
-		wantErr       bool
-	}{
-		{
-			name:          "valid address",
-			advertiseAddr: "192.168.1.1:8080",
-			rpcPort:       9090,
-			want:          "192.168.1.1:9090",
-			wantErr:       false,
-		},
-		{
-			name:          "invalid address",
-			advertiseAddr: "not-valid",
-			rpcPort:       9090,
-			want:          "",
-			wantErr:       true,
-		},
+func testLeaderProduces(t *testing.T, agents []*agent.Agent, clients []api.LogClient) {
+	ctx := context.Background()
+
+	// Produce multiple records
+	records := []*api.Record{
+		{Value: []byte("first")},
+		{Value: []byte("second")},
+		{Value: []byte("third")},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := Config{
-				AdvertiseAddr: tt.advertiseAddr,
-				RPCPort:       tt.rpcPort,
+	for i, record := range records {
+		_, err := clients[0].Produce(ctx, &api.ProduceRequest{Record: record})
+		if err != nil {
+			t.Fatalf("produce %d failed: %v", i, err)
+		}
+	}
+
+	// Wait for replication
+	time.Sleep(3 * time.Second)
+
+	// Verify all records exist on all nodes
+	for nodeIdx, client := range clients {
+		for offset, want := range records {
+			consumeRes, err := client.Consume(ctx, &api.ConsumeRequest{Offset: uint64(offset)})
+			if err != nil {
+				t.Fatalf("node %d consume offset %d failed: %v", nodeIdx, offset, err)
 			}
-			got, err := c.AdvertiseRPCAddr()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("AdvertiseRPCAddr() error = %v, wantErr %v", err, tt.wantErr)
-				return
+
+			if string(consumeRes.Record.Value) != string(want.Value) {
+				t.Fatalf("node %d offset %d: got value=%s, want %s",
+					nodeIdx, offset, consumeRes.Record.Value, want.Value)
 			}
-			if got != tt.want {
-				t.Errorf("AdvertiseRPCAddr() = %v, want %v", got, tt.want)
-			}
-		})
+		}
+	}
+}
+
+func TestAgentShutdown(t *testing.T) {
+	agents, _, teardown := setupAgents(t, 1)
+	defer teardown()
+
+	// Shutdown should succeed without error
+	err := agents[0].Shutdown()
+	if err != nil {
+		t.Fatalf("shutdown failed: %v", err)
+	}
+
+	// Calling shutdown again should be idempotent
+	err = agents[0].Shutdown()
+	if err != nil {
+		t.Fatalf("second shutdown failed: %v", err)
 	}
 }

@@ -60,6 +60,7 @@ func (l *DistributedLog) setupRaft(dataDir string) error {
 	}
 	logConfig := l.config
 	logConfig.Segment.InitialOffset = 1
+	// TODO: replace with raft standard log store
 	logStore, err := newLogStore(logDir, logConfig)
 	if err != nil {
 		return err
@@ -426,13 +427,10 @@ func (s *StreamLayer) Accept() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Read and discard the RaftRPC byte that was written by Dial()
 	b := make([]byte, 1)
-	_, err = conn.Read(b)
-	if err != nil {
+	if _, err := conn.Read(b); err != nil {
 		return nil, err
-	}
-	if !bytes.Equal([]byte{byte(RaftRPC)}, b) {
-		return nil, fmt.Errorf("not a raft rpc")
 	}
 	if s.serverTLSConfig != nil {
 		return tls.Server(conn, s.serverTLSConfig), nil

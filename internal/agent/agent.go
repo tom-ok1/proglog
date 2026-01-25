@@ -126,7 +126,8 @@ func (a *Agent) setupServer() error {
 	// 	a.Config.ACLPolicyFile,
 	// )
 	serverConfig := &server.Config{
-		CommitLog: a.log,
+		CommitLog:   a.log,
+		GetServerer: a.log,
 		// Authorizer: authorizer,
 	}
 	var opts []grpc.ServerOption

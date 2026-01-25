@@ -9,6 +9,7 @@ import (
 
 	api "github.com/tom-ok1/proglog/api/v1"
 	"github.com/tom-ok1/proglog/internal/agent"
+	"github.com/tom-ok1/proglog/internal/loadbalance"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -80,7 +81,7 @@ func setupAgents(t *testing.T, count int) (
 		// Create gRPC client
 		rpcAddr := fmt.Sprintf("127.0.0.1:%d", rpcPorts[i])
 		conn, err := grpc.NewClient(
-			rpcAddr,
+			fmt.Sprintf("%s:///%s", loadbalance.Name, rpcAddr),
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 		)
 		if err != nil {
@@ -135,6 +136,9 @@ func testProduceConsume(t *testing.T, agents []*agent.Agent, clients []api.LogCl
 	if err != nil {
 		t.Fatalf("produce failed: %v", err)
 	}
+
+	// wait for replication
+	time.Sleep(3 * time.Second)
 
 	consumeRes, err := clients[0].Consume(ctx, &api.ConsumeRequest{Offset: produceRes.Offset})
 	if err != nil {

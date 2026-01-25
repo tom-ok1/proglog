@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"net"
+	"sync"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/serf/serf"
@@ -10,10 +11,12 @@ import (
 
 type Membership struct {
 	Config
-	handler Handler
-	serf    *serf.Serf
-	events  chan serf.Event
-	logger  *zap.Logger
+	handler      Handler
+	serf         *serf.Serf
+	events       chan serf.Event
+	logger       *zap.Logger
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 type Config struct {
@@ -30,10 +33,11 @@ type Handler interface {
 
 func New(handler Handler, config Config) (*Membership, error) {
 	m := &Membership{
-		Config:  config,
-		handler: handler,
-		logger:  zap.L().Named("membership"),
-		events:  make(chan serf.Event, 16),
+		Config:   config,
+		handler:  handler,
+		logger:   zap.L().Named("membership"),
+		events:   make(chan serf.Event, 16),
+		shutdown: make(chan struct{}),
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", m.BindAddr)
@@ -79,27 +83,38 @@ func (m *Membership) Members() []serf.Member {
 }
 
 func (m *Membership) Leave() error {
-	return m.serf.Leave()
+	m.shutdownOnce.Do(func() {
+		close(m.shutdown)
+	})
+	if err := m.serf.Leave(); err != nil {
+		return err
+	}
+	return m.serf.Shutdown()
 }
 
 func (m *Membership) eventHandler() {
-	for e := range m.events {
-		switch e.EventType() {
-		case serf.EventMemberJoin:
-			for _, member := range e.(serf.MemberEvent).Members {
-				if m.isLocal(member) {
-					continue
-				}
+	for {
+		select {
+		case <-m.shutdown:
+			return
+		case e := <-m.events:
+			switch e.EventType() {
+			case serf.EventMemberJoin:
+				for _, member := range e.(serf.MemberEvent).Members {
+					if m.isLocal(member) {
+						continue
+					}
 
-				m.handler.Join(member.Name, member.Tags["rpc_addr"])
-			}
-		case serf.EventMemberLeave, serf.EventMemberFailed:
-			for _, member := range e.(serf.MemberEvent).Members {
-				if m.isLocal(member) {
-					continue
+					m.handler.Join(member.Name, member.Tags["rpc_addr"])
 				}
+			case serf.EventMemberLeave, serf.EventMemberFailed:
+				for _, member := range e.(serf.MemberEvent).Members {
+					if m.isLocal(member) {
+						continue
+					}
 
-				m.handler.Leave(member.Name)
+					m.handler.Leave(member.Name)
+				}
 			}
 		}
 	}

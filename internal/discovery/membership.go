@@ -3,6 +3,7 @@ package discovery
 import (
 	"net"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/serf/serf"
 	"go.uber.org/zap"
 )
@@ -47,6 +48,14 @@ func New(handler Handler, config Config) (*Membership, error) {
 	serfConfig.MemberlistConfig.BindPort = addr.Port
 	serfConfig.Tags = config.Tags
 	serfConfig.EventCh = m.events
+	serfLogger := hclog.New(&hclog.LoggerOptions{
+		Name:  "serf",
+		Level: hclog.Info,
+	})
+	serfConfig.Logger = serfLogger.StandardLogger(&hclog.StandardLoggerOptions{
+		InferLevels: true,
+	})
+	serfConfig.MemberlistConfig.Logger = serfConfig.Logger
 
 	m.serf, err = serf.Create(serfConfig)
 	if err != nil {

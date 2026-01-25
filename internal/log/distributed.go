@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"google.golang.org/protobuf/proto"
-
-	"github.com/hashicorp/raft"
 
 	api "github.com/tom-ok1/proglog/api/v1"
 )
@@ -78,7 +78,7 @@ func (l *DistributedLog) setupRaft(dataDir string) error {
 	snapshotStore, err := raft.NewFileSnapshotStore(
 		filepath.Join(dataDir, "raft"),
 		retain,
-		os.Stderr,
+		io.Discard,
 	)
 	if err != nil {
 		return err
@@ -90,11 +90,17 @@ func (l *DistributedLog) setupRaft(dataDir string) error {
 		l.config.Raft.StreamLayer,
 		maxPool,
 		timeout,
-		os.Stderr,
+		io.Discard,
 	)
+
+	raftLogger := hclog.New(&hclog.LoggerOptions{
+		Name:  "raft",
+		Level: hclog.Info,
+	})
 
 	config := raft.DefaultConfig()
 	config.LocalID = l.config.Raft.LocalID
+	config.Logger = raftLogger
 	if l.config.Raft.HeartbeatTimeout != 0 {
 		config.HeartbeatTimeout = l.config.Raft.HeartbeatTimeout
 	}

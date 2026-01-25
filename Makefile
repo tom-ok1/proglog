@@ -76,4 +76,7 @@ compile:
 		--go-grpc_opt=paths=source_relative \
 		--proto_path=.
 
-# END: begin
+TAG ?= 0.0.1
+
+build-docker:
+	docker build -t github.com/tom-ok1/proglog:$(TAG) .

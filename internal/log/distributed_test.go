@@ -48,6 +48,7 @@ func setupDistributedLogs(t *testing.T, count int) ([]*DistributedLog, func()) {
 		lns = append(lns, ln)
 
 		config := Config{}
+		config.Raft.BindAddr = ln.Addr().String()
 		config.Raft.StreamLayer = NewStreamLayer(ln, nil, nil)
 		config.Raft.LocalID = raft.ServerID(fmt.Sprintf("node-%d", i))
 		config.Raft.HeartbeatTimeout = 50 * time.Millisecond
@@ -146,6 +147,7 @@ func testJoinLeave(t *testing.T, logs []*DistributedLog) {
 	t.Cleanup(func() { ln.Close() })
 
 	config := Config{}
+	config.Raft.BindAddr = ln.Addr().String()
 	config.Raft.StreamLayer = NewStreamLayer(ln, nil, nil)
 	config.Raft.LocalID = raft.ServerID("node-new")
 	config.Raft.HeartbeatTimeout = 50 * time.Millisecond

@@ -1,8 +1,8 @@
 # Default values for proglog.
 image:
-  repository: proglog
-  tag: 0.0.1
-  pullPolicy: Never
+  repository: github.com/tom-ok1/proglog
+  tag: 0.0.3
+  pullPolicy: IfNotPresent
 serfPort: 8401
 rpcPort: 8400
 replicas: 3

@@ -518,6 +518,94 @@ func TestWaitForLeader(t *testing.T) {
 	}
 }
 
+func TestBootstrapNodeRestartWithExistingState(t *testing.T) {
+	// Test that a bootstrap node can restart with existing state
+	// and won't try to bootstrap again (which would fail)
+	dataDir := t.TempDir()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to create listener: %v", err)
+	}
+	addr := ln.Addr().String()
+
+	config := Config{}
+	config.Raft.BindAddr = addr
+	config.Raft.StreamLayer = NewStreamLayer(ln, nil, nil)
+	config.Raft.LocalID = raft.ServerID("bootstrap-node")
+	config.Raft.HeartbeatTimeout = 50 * time.Millisecond
+	config.Raft.ElectionTimeout = 50 * time.Millisecond
+	config.Raft.LeaderLeaseTimeout = 50 * time.Millisecond
+	config.Raft.CommitTimeout = 5 * time.Millisecond
+	config.Raft.Bootstrap = true
+
+	// Create initial log and append data
+	log1, err := NewDistributedLog(dataDir, config)
+	if err != nil {
+		t.Fatalf("failed to create distributed log: %v", err)
+	}
+
+	err = log1.WaitForLeader(3 * time.Second)
+	if err != nil {
+		t.Fatalf("failed to wait for leader: %v", err)
+	}
+
+	want := &api.Record{Value: []byte("persisted data")}
+	off, err := log1.Append(want)
+	if err != nil {
+		t.Fatalf("append failed: %v", err)
+	}
+
+	// Close the log
+	err = log1.Close()
+	if err != nil {
+		t.Fatalf("failed to close log: %v", err)
+	}
+	ln.Close()
+
+	// Restart with same data directory and Bootstrap = true
+	ln2, err := net.Listen("tcp", addr)
+	if err != nil {
+		// Port might be in use briefly, try another port
+		ln2, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to create listener for restart: %v", err)
+		}
+	}
+	defer ln2.Close()
+
+	config2 := Config{}
+	config2.Raft.BindAddr = ln2.Addr().String()
+	config2.Raft.StreamLayer = NewStreamLayer(ln2, nil, nil)
+	config2.Raft.LocalID = raft.ServerID("bootstrap-node")
+	config2.Raft.HeartbeatTimeout = 50 * time.Millisecond
+	config2.Raft.ElectionTimeout = 50 * time.Millisecond
+	config2.Raft.LeaderLeaseTimeout = 50 * time.Millisecond
+	config2.Raft.CommitTimeout = 5 * time.Millisecond
+	config2.Raft.Bootstrap = true // Still true, but should skip bootstrap due to existing state
+
+	log2, err := NewDistributedLog(dataDir, config2)
+	if err != nil {
+		t.Fatalf("failed to restart distributed log: %v", err)
+	}
+	defer log2.Close()
+
+	err = log2.WaitForLeader(3 * time.Second)
+	if err != nil {
+		t.Fatalf("failed to wait for leader after restart: %v", err)
+	}
+
+	// Verify data persisted
+	got, err := log2.Read(off)
+	if err != nil {
+		t.Fatalf("read failed after restart: %v", err)
+	}
+
+	if string(got.Value) != string(want.Value) {
+		t.Fatalf("got value=%s, want %s", got.Value, want.Value)
+	}
+}
+
 func TestWaitForLeaderTimeout(t *testing.T) {
 	// Create a log that won't elect a leader (not bootstrapped)
 	dataDir := t.TempDir()

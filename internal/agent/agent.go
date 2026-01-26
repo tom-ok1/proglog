@@ -73,7 +73,11 @@ func New(config Config) (*Agent, error) {
 			return nil, err
 		}
 	}
+	// Start serving before waiting for leader so we can accept incoming Raft connections
 	go a.serve()
+	if err := a.waitForLeader(); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -115,8 +119,13 @@ func (a *Agent) setupLog() error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (a *Agent) waitForLeader() error {
 	if a.Config.Bootstrap {
-		return a.log.WaitForLeader(3 * time.Second)
+		// Use a longer timeout to allow for cluster reconnection after restart
+		return a.log.WaitForLeader(30 * time.Second)
 	}
 	return nil
 }
